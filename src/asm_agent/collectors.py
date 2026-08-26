@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, cast
 
 import dns.exception
@@ -22,6 +25,14 @@ USER_AGENT = "asm-agent/0.1 (+passive-recon)"
 
 class CollectorFailure(RuntimeError):
     """A sanitized collector error safe to include in a report."""
+
+
+class _RateLimitFailure(CollectorFailure):
+    """A sanitized HTTP 429 failure used for collector control flow."""
+
+
+class _AuthenticationFailure(CollectorFailure):
+    """A sanitized HTTP authentication failure used for collector control flow."""
 
 
 @dataclass(slots=True)
@@ -54,6 +65,7 @@ class _HttpCollector:
         timeout: float = 10.0,
         retries: int = 2,
         max_response_bytes: int = 1_000_000,
+        min_request_interval: float = 0.0,
     ) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
@@ -61,10 +73,14 @@ class _HttpCollector:
             raise ValueError("retries must be between 0 and 5")
         if max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
+        if not math.isfinite(min_request_interval) or min_request_interval < 0:
+            raise ValueError("min_request_interval must be a non-negative finite number")
         self._client = client or httpx.Client(follow_redirects=False)
         self._timeout = timeout
         self._retries = retries
         self._max_response_bytes = max_response_bytes
+        self._min_request_interval = min_request_interval
+        self._last_request_at: float | None = None
 
     def _get(
         self,
@@ -103,6 +119,7 @@ class _HttpCollector:
                 if json_body is not None:
                     request_kwargs["json"] = json_body
                 request = self._client.build_request(method, url, **request_kwargs)
+                self._throttle()
                 response = self._client.send(request, stream=True, auth=auth)
                 body = self._read_limited(response)
                 detail = self._provider_error(
@@ -114,10 +131,13 @@ class _HttpCollector:
                 if response.status_code == 429:
                     last_kind = "rate limit"
                     if attempt < self._retries:
+                        time.sleep(self._retry_delay(response, attempt))
                         continue
-                    raise CollectorFailure(_with_detail("upstream rate limit exceeded", detail))
+                    raise _RateLimitFailure(_with_detail("upstream rate limit exceeded", detail))
                 if response.status_code in {401, 403}:
-                    raise CollectorFailure(_with_detail("upstream authentication failed", detail))
+                    raise _AuthenticationFailure(
+                        _with_detail("upstream authentication failed", detail)
+                    )
                 if response.status_code >= 500:
                     last_kind = "server"
                     if attempt < self._retries:
@@ -137,6 +157,37 @@ class _HttpCollector:
                 if response is not None:
                     response.close()
         raise CollectorFailure(f"upstream {last_kind} failure")
+
+    def _throttle(self) -> None:
+        if self._min_request_interval <= 0:
+            return
+        if self._last_request_at is not None:
+            pending = self._min_request_interval - (time.monotonic() - self._last_request_at)
+            if pending > 0:
+                time.sleep(pending)
+        self._last_request_at = time.monotonic()
+
+    def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            delay = self._parse_retry_after(retry_after)
+            if delay is not None:
+                return min(delay, 60.0)
+        base_delay = max(self._min_request_interval, 1.0)
+        return min(base_delay * math.pow(2.0, attempt), 60.0)
+
+    @staticmethod
+    def _parse_retry_after(value: str) -> float | None:
+        normalized = value.strip()
+        if normalized.isdigit():
+            return float(normalized)
+        try:
+            retry_at = parsedate_to_datetime(normalized)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None or retry_at.utcoffset() is None:
+            return None
+        return max((retry_at.astimezone(UTC) - datetime.now(UTC)).total_seconds(), 0.0)
 
     def _read_limited(self, response: httpx.Response) -> bytes:
         content_length = response.headers.get("content-length")
@@ -359,6 +410,7 @@ class ShodanCollector(_HttpCollector):
         **kwargs: Any,
     ) -> None:
         kwargs.setdefault("max_response_bytes", 10_000_000)
+        kwargs.setdefault("min_request_interval", 1.1)
         super().__init__(**kwargs)
         if not 1 <= max_pages <= 10:
             raise ValueError("max_pages must be between 1 and 10")
@@ -411,6 +463,7 @@ class ShodanCollector(_HttpCollector):
         selected_ips = in_scope_ips[: self._max_host_lookups]
         detail_failures: list[tuple[str, str]] = []
         detail_successes = 0
+        consecutive_rate_limit_failures = 0
         for ip in selected_ips:
             try:
                 payload = self._json(
@@ -421,10 +474,18 @@ class ShodanCollector(_HttpCollector):
                 )
                 detail_result = _observations_from_shodan_host(payload, ip, domain)
             except CollectorFailure as error:
-                detail_failures.append((ip, str(error)))
-                if "authentication failed" in str(error) or "rate limit" in str(error):
+                message = str(error)
+                detail_failures.append((ip, message))
+                if isinstance(error, _AuthenticationFailure):
                     break
+                if isinstance(error, _RateLimitFailure):
+                    consecutive_rate_limit_failures += 1
+                    if consecutive_rate_limit_failures >= 3:
+                        break
+                else:
+                    consecutive_rate_limit_failures = 0
                 continue
+            consecutive_rate_limit_failures = 0
             detail_successes += 1
             _merge_collector_results(result, detail_result)
 

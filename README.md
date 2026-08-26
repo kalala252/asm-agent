@@ -19,7 +19,11 @@
 
 Python 3.12以上と[uv](https://docs.astral.sh/uv/)が必要です。
 
+リポジトリを取得し、依存関係を準備します。
+
 ```bash
+git clone https://github.com/kalala252/asm-agent.git
+cd asm-agent
 uv sync
 ```
 
@@ -37,6 +41,8 @@ uv run asm-agent credentials status
 export SHODAN_API_KEY="..."
 export OPENAI_API_KEY="..."
 ```
+
+LinuxなどでOSの認証情報保管機能を利用できない場合は、環境変数を使用してください。
 
 ## 公開情報を収集する
 
@@ -78,7 +84,7 @@ uv run asm-agent analyze \
   --output-dir ./reports
 ```
 
-AI分析ではレポートの内容をOpenAI APIへ送信します。
+AI分析では、収集済みレポートからAIエージェントが参照した資産、根拠、脆弱性候補をOpenAI APIへ送信します。OpenAI APIキーはAPI認証にのみ使用し、Shodan APIキーとローカルのファイルパスは分析入力に含めません。
 
 ## 出力ファイル
 

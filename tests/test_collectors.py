@@ -10,6 +10,11 @@ import respx
 from asm_agent.collectors import CollectorFailure, CrtNameCollector, DnsCollector, ShodanCollector
 
 
+@pytest.fixture(autouse=True)
+def _disable_collector_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("asm_agent.collectors.time.sleep", lambda _seconds: None)
+
+
 def _mock_empty_shodan_host_information() -> respx.Route:
     return respx.get(
         url__regex=re.compile(
@@ -146,6 +151,143 @@ def test_api_rate_limit() -> None:
     )
     with pytest.raises(CollectorFailure, match="rate limit"):
         ShodanCollector(api_key="x", retries=0).collect("example.com")
+
+
+@respx.mock
+def test_shodan_retries_rate_limit_then_continues_host_information(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("asm_agent.collectors.time.sleep", sleep_calls.append)
+    respx.get("https://api.shodan.io/shodan/host/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 2,
+                "matches": [
+                    {
+                        "hostnames": [f"host-{index}.example.com"],
+                        "ip_str": f"192.0.2.{index}",
+                        "port": 443,
+                    }
+                    for index in range(1, 3)
+                ],
+            },
+        )
+    )
+    first_host = respx.get("https://api.shodan.io/shodan/host/192.0.2.1").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "2"}, json={"error": "rate limited"}),
+            httpx.Response(200, json={"data": []}),
+        ]
+    )
+    second_host = respx.get("https://api.shodan.io/shodan/host/192.0.2.2").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    result = ShodanCollector(api_key="token", retries=1).collect("example.com")
+
+    assert first_host.call_count == 2
+    assert second_host.call_count == 1
+    assert 2.0 in sleep_calls
+    assert result.partial is False
+
+
+@respx.mock
+def test_shodan_stops_after_three_consecutive_rate_limited_hosts() -> None:
+    respx.get("https://api.shodan.io/shodan/host/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 4,
+                "matches": [
+                    {
+                        "hostnames": [f"host-{index}.example.com"],
+                        "ip_str": f"192.0.2.{index}",
+                        "port": 443,
+                    }
+                    for index in range(1, 5)
+                ],
+            },
+        )
+    )
+    host_routes = [
+        respx.get(f"https://api.shodan.io/shodan/host/192.0.2.{index}").mock(
+            return_value=httpx.Response(429, json={"error": "rate limited"})
+        )
+        for index in range(1, 5)
+    ]
+
+    result = ShodanCollector(api_key="token", retries=0).collect("example.com")
+
+    assert [route.call_count for route in host_routes] == [1, 1, 1, 0]
+    assert result.partial is True
+    assert any("queried 3 of 4" in warning for warning in result.warnings)
+
+
+@respx.mock
+def test_shodan_does_not_classify_provider_message_as_rate_limit() -> None:
+    respx.get("https://api.shodan.io/shodan/host/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 4,
+                "matches": [
+                    {
+                        "hostnames": [f"host-{index}.example.com"],
+                        "ip_str": f"192.0.2.{index}",
+                        "port": 443,
+                    }
+                    for index in range(1, 5)
+                ],
+            },
+        )
+    )
+    for index in range(1, 4):
+        respx.get(f"https://api.shodan.io/shodan/host/192.0.2.{index}").mock(
+            return_value=httpx.Response(
+                400,
+                json={"error": "invalid request containing the words rate limit"},
+            )
+        )
+    final_host = respx.get("https://api.shodan.io/shodan/host/192.0.2.4").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    result = ShodanCollector(api_key="token", retries=0).collect("example.com")
+
+    assert final_host.call_count == 1
+    assert result.partial is True
+
+
+@respx.mock
+def test_shodan_waits_between_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monotonic_values = iter([100.0, 100.4, 101.1])
+    sleep_calls: list[float] = []
+    monkeypatch.setattr("asm_agent.collectors.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("asm_agent.collectors.time.sleep", sleep_calls.append)
+    respx.get("https://api.shodan.io/shodan/host/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "total": 1,
+                "matches": [
+                    {
+                        "hostnames": ["www.example.com"],
+                        "ip_str": "192.0.2.1",
+                        "port": 443,
+                    }
+                ],
+            },
+        )
+    )
+    respx.get("https://api.shodan.io/shodan/host/192.0.2.1").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    ShodanCollector(api_key="token", retries=0).collect("example.com")
+
+    assert sleep_calls == [pytest.approx(0.7)]
 
 
 @respx.mock
