@@ -1,25 +1,14 @@
 # asm-agent
 
-`asm-agent`は、収集した公開情報を根拠付きで分析し、質問に応じて説明するAIエージェントです。
+ドメイン名を指定して、公開情報に記録されたホスト名やIPアドレス、サービスを調べるCLIツールです。収集結果は、情報源と観測日時を添えてJSONとMarkdownに保存します。
 
-公開情報の収集は`scan`、AIエージェントによる分析は`analyze`で実行します。AIエージェントは収集済みレポートから必要な根拠をツールで参照し、確認できた事実と未確定事項を分けて説明します。
+情報源にはcrt.nameとDNSを使います。Shodanを有効にすると、ポートや製品情報、CVE候補も取得できます。対象サイトへのアクセスやポートスキャンは行いません。
 
-対象サイトへのアクセスやポートスキャンは行いません。
-
-## できること
-
-- 公開されているホスト名、IPアドレス、ポート、製品、CVE候補を調べます
-- 情報源と観測日時を保存し、結果の根拠を追跡できるようにします
-- 質問に応じて、AIエージェントが収集結果と根拠を読み分けて説明します
-- `crt.name`、DNS、任意で有効にしたShodanを情報源として利用します
-
-公開情報の収集だけでも利用できます。AIエージェントによる分析にはOpenAI APIキーが必要です。
+収集は`scan`、保存した結果のAI分析は`analyze`で実行します。収集だけならOpenAI APIキーは不要です。
 
 ## セットアップ
 
-Python 3.12以上と[uv](https://docs.astral.sh/uv/)が必要です。
-
-リポジトリを取得し、依存関係を準備します。
+Python 3.12以上と[uv](https://docs.astral.sh/uv/)を用意して、リポジトリを取得します。
 
 ```bash
 git clone https://github.com/kalala252/asm-agent.git
@@ -27,7 +16,7 @@ cd asm-agent
 uv sync
 ```
 
-ShodanとOpenAIを使う場合は、APIキーをOSの認証情報保管機能へ保存します。
+ShodanやAI分析を使う場合は、使うサービスのAPIキーを登録してください。キーはOSの認証情報ストアに保存されます。
 
 ```bash
 uv run asm-agent credentials set-shodan
@@ -35,18 +24,18 @@ uv run asm-agent credentials set-openai
 uv run asm-agent credentials status
 ```
 
-環境変数も利用できます。環境変数が設定されている場合は、OSに保存した値より優先されます。
+環境変数でも指定できます。両方に設定した場合は、環境変数の値を優先します。
 
 ```bash
 export SHODAN_API_KEY="..."
 export OPENAI_API_KEY="..."
 ```
 
-LinuxなどでOSの認証情報保管機能を利用できない場合は、環境変数を使用してください。
+OSの認証情報ストアを使えない環境では、環境変数を使ってください。
 
-## 公開情報を収集する
+## 収集
 
-`crt.name`とDNSから収集します。
+ドメイン名と保存先を指定します。
 
 ```bash
 uv run asm-agent scan \
@@ -54,7 +43,7 @@ uv run asm-agent scan \
   --output-dir ./reports
 ```
 
-Shodanも利用する場合は`--enable-shodan`を付けます。
+Shodanの情報も取得するには、`--enable-shodan`を付けて実行してください。
 
 ```bash
 uv run asm-agent scan \
@@ -63,11 +52,13 @@ uv run asm-agent scan \
   --output-dir ./reports
 ```
 
-Shodan検索は既定で1ページ、IPごとの詳細取得は最大100件です。変更する場合は`--max-api-pages`と`--max-shodan-host-lookups`を指定してください。
+Shodan検索は既定で1ページ、IPごとの詳細取得は100件までです。上限は`--max-api-pages`と`--max-shodan-host-lookups`で変更できます。
 
-## AIエージェントで分析する
+ShodanのCVEは、過去の観測から関連付けられた候補です。レポートに載っていても、現在そのサービスに脆弱性があるとは限りません。
 
-AIエージェントが収集済みのJSONレポートを読み、確認できた事実、根拠、未確定事項を整理します。既定モデルは`gpt-5.6-luna`です。
+## AI分析
+
+保存したJSONレポートを指定すると、観測した内容と、公開情報だけでは判断できない点をAIがまとめます。OpenAI APIキーが必要です。分析には既定で`gpt-5.6-luna`を使います。
 
 ```bash
 uv run asm-agent analyze \
@@ -75,7 +66,7 @@ uv run asm-agent analyze \
   --output-dir ./reports
 ```
 
-質問を指定することもできます。
+知りたいことがある場合は、`--question`で質問を渡せます。
 
 ```bash
 uv run asm-agent analyze \
@@ -84,25 +75,23 @@ uv run asm-agent analyze \
   --output-dir ./reports
 ```
 
-AI分析では、収集済みレポートからAIエージェントが参照した資産、根拠、脆弱性候補をOpenAI APIへ送信します。OpenAI APIキーはAPI認証にのみ使用し、Shodan APIキーとローカルのファイルパスは分析入力に含めません。
+分析時には、AIが参照する資産情報や根拠、脆弱性候補をOpenAI APIに送信します。OpenAI APIキーは認証に使い、Shodan APIキーとローカルのファイルパスは分析内容に含めません。
 
 ## 出力ファイル
 
-収集結果は次の2ファイルへ保存されます。
+収集結果はJSONとMarkdownで保存されます。
 
 ```text
 reports/example.com.json
 reports/example.com.md
 ```
 
-AI分析を実行すると、次のファイルが追加されます。
+AI分析の結果は別のファイルに保存します。
 
 ```text
 reports/example.com.analysis.json
 reports/example.com.analysis.md
 ```
-
-ShodanのCVEは過去の観測に基づく候補であり、現在も脆弱であることを証明するものではありません。
 
 ## 開発
 
