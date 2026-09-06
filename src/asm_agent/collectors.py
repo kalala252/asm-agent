@@ -346,6 +346,7 @@ class DnsCollector:
                 except dns.resolver.NoAnswer:
                     continue
                 except (dns.exception.Timeout, dns.resolver.NoNameservers) as error:
+                    result.partial = True
                     result.warnings.append(
                         f"DNS {record_type} failed for {hostname}: {type(error).__name__}"
                     )
@@ -358,6 +359,7 @@ class DnsCollector:
                         try:
                             normalized_ip = str(ipaddress.ip_address(value))
                         except ValueError:
+                            result.partial = True
                             result.warnings.append(
                                 f"DNS returned invalid {record_type} for {hostname}"
                             )
@@ -378,6 +380,7 @@ class DnsCollector:
                         try:
                             target = normalize_hostname(value)
                         except DomainValidationError:
+                            result.partial = True
                             result.warnings.append(f"DNS returned invalid CNAME for {hostname}")
                             continue
                         if not is_in_scope(target, domain):

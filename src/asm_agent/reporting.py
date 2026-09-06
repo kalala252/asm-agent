@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from asm_agent.models import ScanReport
 
@@ -14,12 +15,28 @@ def write_reports(report: ScanReport, output_dir: Path) -> tuple[Path, Path]:
     json_path = output_dir / f"{domain}.json"
     markdown_path = output_dir / f"{domain}.md"
     payload = report.model_dump(mode="json")
-    json_path.write_text(
+    markdown = render_markdown(report)
+    _write_text_atomic(
+        json_path,
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
-    markdown_path.write_text(render_markdown(report), encoding="utf-8")
+    _write_text_atomic(markdown_path, markdown)
     return json_path, markdown_path
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Replace a complete file without truncating an existing report on write failure."""
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".report-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def render_markdown(report: ScanReport) -> str:

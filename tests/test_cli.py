@@ -228,3 +228,67 @@ def test_cli_collector_failure_writes_partial_report_and_exits_1(tmp_path: Path)
     assert result.exit_code == 1
     assert route.call_count == 3
     assert (tmp_path / "example.com.json").exists()
+
+
+@respx.mock
+def test_scan_retains_history_and_prints_automatic_diff(tmp_path: Path) -> None:
+    route = respx.get("https://crt.name/v1/search")
+    args = ["scan", "--domain", "example.com", "--skip-dns", "--output-dir", str(tmp_path)]
+    route.mock(return_value=httpx.Response(200, json=[{"sub": "old.example.com"}]))
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0
+    assert "History JSON:" in first.output
+    first_payload = (tmp_path / "example.com.json").read_bytes()
+    route.mock(return_value=httpx.Response(200, json=[{"sub": "new.example.com"}]))
+    second = runner.invoke(app, args)
+    assert second.exit_code == 0
+    assert "Previous JSON:" in second.output
+    assert "Diff JSON:" in second.output
+    histories = list((tmp_path / "history" / "example.com").glob("*/example.com.json"))
+    assert len(histories) == 2
+    assert first_payload in [path.read_bytes() for path in histories]
+    diffs = list((tmp_path / "history" / "example.com").rglob("*.diff.json"))
+    assert len(diffs) == 1
+    payload = json.loads(diffs[0].read_text())
+    assert payload["added_assets"][0]["value"] == "new.example.com"
+
+
+@respx.mock
+def test_scan_reports_invalid_latest_file_without_overwriting_it(tmp_path: Path) -> None:
+    respx.get("https://crt.name/v1/search").mock(return_value=httpx.Response(200, json=[]))
+    latest = tmp_path / "example.com.json"
+    latest.write_text("broken")
+    result = runner.invoke(app, [
+        "scan", "--domain", "example.com", "--skip-dns", "--output-dir", str(tmp_path),
+    ])
+    assert result.exit_code == 2
+    assert "invalid latest report" in result.output
+    assert latest.read_text() == "broken"
+
+
+@respx.mock
+def test_scan_recovers_corrupt_latest_archive_and_outputs_warning(tmp_path: Path) -> None:
+    route = respx.get("https://crt.name/v1/search")
+    args = ["scan", "--domain", "example.com", "--skip-dns", "--output-dir", str(tmp_path)]
+    route.respond(200, json=[{"sub": "old.example.com"}])
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0
+    archive = next((tmp_path / "history" / "example.com").glob("*/example.com.json"))
+    original = archive.read_bytes()
+    archive.write_text("broken archive")
+
+    route.respond(200, json=[{"sub": "new.example.com"}])
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0
+    assert "退避" in result.output
+    assert "Diff JSON:" in result.output
+    assert archive.read_bytes() == original
+    assert json.loads((tmp_path / "example.com.json").read_text())["assets"][-1]["value"] == (
+        "new.example.com"
+    )
+    diffs = list((tmp_path / "history" / "example.com").glob("*/*.diff.json"))
+    assert len(diffs) == 1
+    diff = json.loads(diffs[0].read_text())
+    assert diff["comparable"] is True
+    assert diff["missing_assets"][0]["value"] == "old.example.com"

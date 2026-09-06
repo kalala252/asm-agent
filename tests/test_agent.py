@@ -10,6 +10,7 @@ from asm_agent.agent import (
     AgentAnalysis,
     AnalysisDependencies,
     AssetObservation,
+    AssociationHypothesis,
     VulnerabilitySummary,
     run_analysis,
     validate_analysis,
@@ -126,6 +127,37 @@ def test_analysis_is_grounded_in_report_assets_and_evidence() -> None:
     )
     with pytest.raises(ValueError, match="unknown asset"):
         validate_analysis(dependencies, invalid)
+
+
+@pytest.mark.parametrize("kind", ["asset", "hypothesis"])
+@pytest.mark.parametrize("include_matching", [False, True])
+def test_analysis_rejects_unrelated_existing_evidence(kind: str, include_matching: bool) -> None:
+    report = _report()
+    report = report.model_copy(update={"evidence": [
+        *report.evidence,
+        report.evidence[0].model_copy(update={"subject": "other.example.com"}),
+    ]})
+    ids = ["E0001", "E0002"] if include_matching else ["E0002"]
+    analysis = _analysis().model_copy(deep=True)
+    if kind == "asset":
+        analysis.observed_assets[0] = analysis.observed_assets[0].model_copy(
+            update={"evidence_ids": ids}
+        )
+    else:
+        analysis.association_hypotheses.append(AssociationHypothesis(
+            subject="www.example.com", hypothesis="対象と関係する可能性があります。",
+            confidence="low", evidence_ids=ids, uncertainty="管理者は未確認です。",
+        ))
+    with pytest.raises(ValueError, match="evidence does not match"):
+        validate_analysis(AnalysisDependencies.from_reports(report), analysis)
+
+
+def test_analysis_accepts_asset_on_object_side_of_evidence() -> None:
+    analysis = _analysis().model_copy(deep=True)
+    analysis.observed_assets[0] = analysis.observed_assets[0].model_copy(
+        update={"asset_type": AssetType.DOMAIN, "value": "example.com"}
+    )
+    assert validate_analysis(AnalysisDependencies.from_reports(_report()), analysis) == analysis
 
 
 def test_vulnerability_summary_must_match_retained_shodan_observation() -> None:

@@ -8,6 +8,8 @@ from asm_agent.diffing import compare_reports, load_report, write_diff_reports
 from asm_agent.models import (
     Asset,
     AssetType,
+    CollectorError,
+    CollectorRun,
     Finding,
     InputScope,
     ScanMetadata,
@@ -110,3 +112,60 @@ def test_load_report_accepts_existing_json_without_new_optional_fields(tmp_path:
     loaded = load_report(path)
     assert loaded.input_scope.max_api_pages == 1
     assert loaded.association_assessments == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("skip_dns", False), ("enable_shodan", True), ("max_hosts", 10),
+     ("max_api_pages", 2), ("max_shodan_host_lookups", 5)],
+)
+def test_diff_explains_changed_collection_scope(field: str, value: object) -> None:
+    previous = _report("example.com", datetime(2026, 1, 1, tzinfo=UTC), [], {})
+    current = previous.model_copy(update={
+        "input_scope": previous.input_scope.model_copy(update={field: value}),
+    })
+    diff = compare_reports(previous, current)
+    assert not diff.comparable
+    assert any(field in issue for issue in diff.comparison_issues)
+
+
+@pytest.mark.parametrize("problem", ["failed", "partial", "next_page", "error", "missing"])
+@pytest.mark.parametrize("side", ["previous", "current"])
+def test_diff_explains_incomplete_collection(problem: str, side: str, tmp_path: Path) -> None:
+    previous = _report("example.com", datetime(2026, 1, 1, tzinfo=UTC), [], {})
+    current = _report("example.com", datetime(2026, 1, 2, tzinfo=UTC), [], {})
+    run = CollectorRun(
+        collector="crt.name", status="success", started_at=previous.metadata.started_at,
+        completed_at=previous.metadata.completed_at, received_count=10, accepted_count=10,
+        partial=False, next_page_available=False,
+    )
+    previous = previous.model_copy(update={"collector_runs": [run]})
+    current = current.model_copy(update={"collector_runs": [run]})
+    changes: dict[str, object] = {}
+    if problem == "error":
+        changes["collector_errors"] = [CollectorError(collector="crt.name", message="failed")]
+    elif problem == "missing":
+        changes["collector_runs"] = []
+    else:
+        run_changes: dict[str, object] = {
+            "failed": {"status": "failed"}, "partial": {"partial": True},
+            "next_page": {"next_page_available": True},
+        }[problem]
+        changes["collector_runs"] = [run.model_copy(update=run_changes)]
+    if side == "previous":
+        previous = previous.model_copy(update=changes)
+    else:
+        current = current.model_copy(update=changes)
+    diff = compare_reports(previous, current)
+    assert not diff.comparable
+    assert any("crt.name" in issue for issue in diff.comparison_issues)
+    _, markdown = write_diff_reports(diff, tmp_path)
+    assert "収集条件・取得状況に注意" in markdown.read_text()
+    assert all(issue in markdown.read_text() for issue in diff.comparison_issues)
+
+
+def test_diff_rejects_reversed_chronology() -> None:
+    previous = _report("example.com", datetime(2026, 1, 2, tzinfo=UTC), [], {})
+    current = _report("example.com", datetime(2026, 1, 1, tzinfo=UTC), [], {})
+    with pytest.raises(ValueError, match="earlier"):
+        compare_reports(previous, current)

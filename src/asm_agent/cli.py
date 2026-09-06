@@ -17,7 +17,7 @@ from asm_agent.credentials import CredentialError, delete_secret, resolve_secret
 from asm_agent.diffing import compare_reports, load_report, write_diff_reports
 from asm_agent.domain import DomainValidationError, normalize_domain
 from asm_agent.engine import ReconEngine, ScanOptions
-from asm_agent.reporting import write_reports
+from asm_agent.history import save_scan_report
 
 app = typer.Typer(no_args_is_help=True, help="Passive Attack Surface調査CLI")
 credentials_app = typer.Typer(no_args_is_help=True, help="API認証情報を安全に管理")
@@ -165,11 +165,23 @@ def scan(
             max_shodan_host_lookups=max_shodan_host_lookups,
         )
     )
-    json_path, markdown_path = write_reports(report, output_dir)
+    try:
+        saved = save_scan_report(report, output_dir)
+    except (OSError, ValueError) as error:
+        typer.echo(f"Error saving report: {error}", err=True)
+        raise typer.Exit(code=2) from error
     if verbose:
         typer.echo(f"assets={len(report.assets)} evidence={len(report.evidence)}")
-    typer.echo(f"JSON: {json_path}")
-    typer.echo(f"Markdown: {markdown_path}")
+    typer.echo(f"JSON: {saved.json_path}")
+    typer.echo(f"Markdown: {saved.markdown_path}")
+    typer.echo(f"History JSON: {saved.history_json_path}")
+    if saved.previous_path is not None:
+        typer.echo(f"Previous JSON: {saved.previous_path}")
+    if saved.diff_paths is not None:
+        typer.echo(f"Diff JSON: {saved.diff_paths[0]}")
+        typer.echo(f"Diff Markdown: {saved.diff_paths[1]}")
+    for warning in saved.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
     if report.collector_errors:
         raise typer.Exit(code=1)
 

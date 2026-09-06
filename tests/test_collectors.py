@@ -643,6 +643,7 @@ class DefensiveResolver:
 def test_dns_rejects_invalid_and_out_of_scope_answers() -> None:
     result = DnsCollector(resolver=DefensiveResolver()).collect(["www.example.com"], "example.com")
     assert not result.assets
+    assert result.partial
     assert result.warnings == [
         "DNS returned invalid A for www.example.com",
         "DNS CNAME outside scope ignored for www.example.com",
@@ -658,3 +659,4 @@ def test_dns_timeout_becomes_a_warning() -> None:
     result = DnsCollector(resolver=TimeoutResolver()).collect(["www.example.com"], "example.com")
     assert len(result.warnings) == 3
     assert all("Timeout" in warning for warning in result.warnings)
+    assert result.partial

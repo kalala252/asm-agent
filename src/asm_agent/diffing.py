@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from asm_agent.models import AssetType, ScanReport
 
@@ -41,6 +41,8 @@ class ReportDiff(BaseModel):
     priority_changes: list[PriorityChange]
     unchanged_asset_count: int
     warnings: list[str]
+    comparable: bool = False
+    comparison_issues: list[str] = Field(default_factory=list)
 
 
 def load_report(path: Path) -> ScanReport:
@@ -56,6 +58,9 @@ def compare_reports(previous: ScanReport, current: ScanReport) -> ReportDiff:
     """Compare reports without treating absence as proof of removal."""
     if previous.input_scope.domain != current.input_scope.domain:
         raise ValueError("reports must describe the same domain")
+    if current.metadata.completed_at < previous.metadata.completed_at:
+        raise ValueError("current report must not be earlier than previous report")
+    comparison_issues = collection_comparison_issues(previous, current)
     previous_assets = {
         (asset.asset_type, asset.value): asset for asset in previous.assets
     }
@@ -98,9 +103,52 @@ def compare_reports(previous: ScanReport, current: ScanReport) -> ReportDiff:
         unchanged_asset_count=len(previous_keys & current_keys),
         warnings=[
             "A missing asset was not observed in the current report; "
-            "removal or closure is not confirmed."
+            "removal or closure is not confirmed.",
+            *comparison_issues,
         ],
+        comparable=not comparison_issues,
+        comparison_issues=comparison_issues,
     )
+
+
+def collection_issues(report: ScanReport) -> list[str]:
+    """Describe known gaps; an empty result is not proof of exhaustive discovery."""
+    expected = {"crt.name"}
+    if not report.input_scope.skip_dns:
+        expected.add("dns")
+    if report.input_scope.enable_shodan:
+        expected.add("shodan")
+    recorded = {run.collector for run in report.collector_runs}
+    issues = [f"{name}: 実行結果がありません。" for name in sorted(expected - recorded)]
+    for run in report.collector_runs:
+        if run.status == "failed":
+            issues.append(f"{run.collector}: 取得に失敗しています。")
+        if run.partial or run.next_page_available:
+            issues.append(f"{run.collector}: 一部未取得のデータがあります。")
+    for error in report.collector_errors:
+        issues.append(f"{error.collector}: 収集エラーが記録されています。")
+    return sorted(set(issues))
+
+
+def collection_comparison_issues(previous: ScanReport, current: ScanReport) -> list[str]:
+    """Explain why observation deltas cannot be attributed to surface changes alone."""
+    issues = []
+    before = previous.input_scope.model_dump()
+    after = current.input_scope.model_dump()
+    for field in sorted(before.keys() | after.keys()):
+        if before.get(field) != after.get(field):
+            issues.append(
+                f"収集条件 {field} が変わっています: {before.get(field)} → {after.get(field)}"
+            )
+    if previous.metadata.version != current.metadata.version:
+        issues.append("ツールのバージョンが異なるため、判定方法が変わっている可能性があります。")
+    if {run.collector for run in previous.collector_runs} != {
+        run.collector for run in current.collector_runs
+    }:
+        issues.append("実行した情報源の構成が異なります。")
+    for label, report in (("前回", previous), ("今回", current)):
+        issues.extend(f"{label}: {issue}" for issue in collection_issues(report))
+    return issues
 
 
 def write_diff_reports(report_diff: ReportDiff, output_dir: Path) -> tuple[Path, Path]:
@@ -127,10 +175,19 @@ def render_diff_markdown(report_diff: ReportDiff) -> str:
         f"- 新規観測: {len(report_diff.added_assets)}",
         f"- 今回未観測: {len(report_diff.missing_assets)}",
         f"- 継続観測: {report_diff.unchanged_asset_count}",
-        "",
-        "## 新規に観測された資産",
+        "- 比較条件: " + (
+            "収集条件が一致し、記録上の取得失敗・一部未取得はありません。"
+            if report_diff.comparable else "収集条件・取得状況に注意が必要です。"
+        ),
         "",
     ]
+    if report_diff.comparison_issues:
+        lines.extend([
+            "## 比較上の制約", "",
+            "資産数や優先度の差には、収集条件や取得状況の違いが含まれる可能性があります。", "",
+            *(f"- {issue}" for issue in report_diff.comparison_issues), "",
+        ])
+    lines.extend(["## 新規に観測された資産", ""])
     lines.extend(_render_assets(report_diff.added_assets))
     lines.extend(["", "## 今回は観測されなかった資産", ""])
     lines.extend(_render_assets(report_diff.missing_assets))

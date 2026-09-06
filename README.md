@@ -56,6 +56,23 @@ Shodan検索は既定で1ページ、IPごとの詳細取得は100件までで�
 
 ShodanのCVEは、過去の観測から関連付けられた候補です。レポートに載っていても、現在そのサービスに脆弱性があるとは限りません。
 
+## 履歴と差分
+
+同じ保存先で`scan`を再実行すると、過去の結果との差分も保存します。初回は収集結果だけを出力します。
+
+比較相手には、収集条件、ツールのバージョン、使った情報源が同じで、取得失敗や一部未取得のない過去の結果を優先します。その中で最も新しい結果を選び、該当するものがなければ今回より前の最新の結果を使います。
+
+条件の違いや取得の失敗は、差分レポートの冒頭に表示します。JSONでは`comparable`と`comparison_issues`で確認できます。`comparable: true`でも、すべての資産を発見できたとは限りません。また、今回見つからなかった資産を閉鎖済みとは扱いません。
+
+比較するファイルを自分で選ぶ場合は、`diff`を使ってください。
+
+```bash
+uv run asm-agent diff \
+  --previous ./previous/example.com.json \
+  --current ./reports/example.com.json \
+  --output-dir ./comparison
+```
+
 ## AI分析
 
 保存したJSONレポートを指定すると、観測した内容と、公開情報だけでは判断できない点をAIがまとめます。OpenAI APIキーが必要です。分析には既定で`gpt-5.6-luna`を使います。
@@ -75,6 +92,18 @@ uv run asm-agent analyze \
   --output-dir ./reports
 ```
 
+前回との差をAIに説明させるには、`--previous`で前回のJSONを渡してください。自動比較と同じ結果を使う場合は、`scan`の実行後に表示される`Previous JSON`のパスを指定します。
+
+```bash
+uv run asm-agent analyze \
+  --report ./reports/example.com.json \
+  --previous ./previous/example.com.json \
+  --question "前回との違いと、比較する際の制約を説明して" \
+  --output-dir ./reports
+```
+
+資産の説明と関連性の推測では、引用した根拠すべてにその対象が含まれるかを検証します。別の資産の根拠を引用した場合はAIに修正を求め、直らなければ分析を失敗とします。この検証で文章中のすべての主張の正しさを確認できるわけではありません。
+
 分析時には、AIが参照する資産情報や根拠、脆弱性候補をOpenAI APIに送信します。OpenAI APIキーは認証に使い、Shodan APIキーとローカルのファイルパスは分析内容に含めません。
 
 ## 出力ファイル
@@ -86,12 +115,22 @@ reports/example.com.json
 reports/example.com.md
 ```
 
+収集の履歴は`reports/history/example.com/<実行日時>-<内容ハッシュ>/`に保存します。同じ日時でも内容が違えば別の履歴になり、同じ結果を保存し直しても重複は作りません。自動比較の`example.com.diff.json`と`example.com.diff.md`も、今回の履歴フォルダに入ります。
+
+保存先は実行後の`History JSON`や`Diff JSON`で確認できます。既存の`example.com.json`は、履歴へ保存してから最新版に置き換えます。
+
 AI分析の結果は別のファイルに保存します。
 
 ```text
 reports/example.com.analysis.json
 reports/example.com.analysis.md
 ```
+
+### 履歴ファイルが壊れた場合
+
+最新版JSONが正常なら、破損した履歴を退避して作り直します。履歴JSONが欠けている場合や内容が一致しない場合も同じ扱いです。退避先は`reports/history/example.com/.quarantine/`で、実行時の警告にもパスを表示します。
+
+最新版JSON自体が壊れている場合は、上書きせずエラーで停止します。それ以外の読み取れない履歴は、警告を出して比較から除外します。退避したファイルは比較に使わず、履歴とともに自動削除もしません。
 
 ## 開発
 
